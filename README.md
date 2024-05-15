@@ -8,7 +8,7 @@
  Persistent storage to disk
  Optional gzip compression
 
-**NOTE:** This library is still in the process of being developed and many features are still being added.
+# **NOTE:** This library is still in the process of being developed and many features are still being added.
 
 ## Installation
 
