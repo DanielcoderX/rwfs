@@ -17,9 +17,6 @@ func (f *MemFile) GobEncode() ([]byte, error) {
 	if err := encoder.Encode(f.Name); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.mode); err != nil {
-		return nil, err
-	}
 	if err := encoder.Encode(f.modTime); err != nil {
 		return nil, err
 	}
@@ -36,6 +33,9 @@ func (f *MemFile) GobEncode() ([]byte, error) {
 		return nil, err
 	}
 	if err := encoder.Encode(f.closed); err != nil {
+		return nil, err
+	}
+	if err := encoder.Encode(f.permissions); err != nil {
 		return nil, err
 	}
 
@@ -59,9 +59,6 @@ func (f *MemFile) GobDecode(data []byte) error {
 	if err := decoder.Decode(&f.Name); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.mode); err != nil {
-		return err
-	}
 	if err := decoder.Decode(&f.modTime); err != nil {
 		return err
 	}
@@ -81,6 +78,10 @@ func (f *MemFile) GobDecode(data []byte) error {
 		return err
 	}
 
+	// Encode the permissions
+	if err := decoder.Decode(&f.permissions); err != nil {
+		return err
+	}
 	// Decode the Data field as a byte slice
 	var dataBytes []byte
 	if err := decoder.Decode(&dataBytes); err != nil {

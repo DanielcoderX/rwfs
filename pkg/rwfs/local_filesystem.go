@@ -15,12 +15,13 @@ type LocalFileSystem struct {
 	compressLevel int
 	encryption    bool
 	encryptionKey string
+	RootPath      string
 }
 
 // NewLocalFileSystem creates a new LocalFileSystem using the provided configuration
 func NewLocalFileSystem(config FileSystemConfig) (*LocalFileSystem, error) {
 	fs := &LocalFileSystem{
-		MemFileSystem: NewMemFileSystem(),
+		MemFileSystem: NewMemFileSystem(config),
 		compression:   config.Compression,
 		compressLevel: config.CompressLevel,
 		encryption:    config.Encryption,

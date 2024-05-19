@@ -10,30 +10,34 @@ import (
 
 // MemFile represents a file in the memory file system
 type MemFile struct {
-	Name       string
-	Data       *bytes.Buffer
-	mu         RWMutex
-	size       int64
-	mode       os.FileMode
-	modTime    time.Time
-	accessTime time.Time
-	changeTime time.Time
-	owner      string
-	position   int64
-	closed     bool
+	Name        string
+	Data        *bytes.Buffer
+	mu          RWMutex
+	size        int64
+	modTime     time.Time
+	accessTime  time.Time
+	changeTime  time.Time
+	owner       string
+	position    int64
+	closed      bool
+	permissions FilePermission
+	refCount    int
+	Config      FileSystemConfig
+	Cache       *FileCache
 }
 
 // NewMemFile creates a new memory file
-func NewMemFile(name, owner string, mode os.FileMode) *MemFile {
+func NewMemFile(name, owner string, permissions FilePermission) *MemFile {
 	now := time.Now()
 	return &MemFile{
-		Name:       name,
-		Data:       new(bytes.Buffer),
-		mode:       mode,
-		modTime:    now,
-		accessTime: now,
-		changeTime: now,
-		owner:      owner,
+		Name:        name,
+		Data:        new(bytes.Buffer),
+		modTime:     now,
+		accessTime:  now,
+		changeTime:  now,
+		owner:       owner,
+		permissions: permissions,
+		refCount:    1,
 	}
 }
 
@@ -45,6 +49,12 @@ func (f *MemFile) Read(p []byte) (int, error) {
 	defer f.mu.RUnlock()
 	if f.closed {
 		return 0, os.ErrClosed
+	}
+	if f.Config.Compression {
+		_, _ = DecompressData(f.Data.Bytes())
+	}
+	if f.Config.Encryption {
+		_, _ = DecryptData(f.Data.Bytes(), f.Config.EncryptionKey)
 	}
 	n, err := f.Data.Read(p)
 	if err == nil {
@@ -60,11 +70,22 @@ func (f *MemFile) Write(p []byte) (int, error) {
 	if f.closed {
 		return 0, os.ErrClosed
 	}
+	f.Data.Reset()
+	if f.Config.Compression {
+		_, _ = CompressData(f.Data.Bytes(), f.Config.CompressLevel)
+	}
+	if f.Config.Encryption {
+		_, _ = EncryptData(f.Data.Bytes(), f.Config.EncryptionKey)
+	}
 	n, err := f.Data.Write(p)
 	if err == nil {
 		f.size += int64(n)
 		f.modTime = time.Now()
 		f.changeTime = time.Now()
+	}
+	// Cache the file after write
+	if f.Cache != nil {
+		f.Cache.Put(f.Name, f, true)
 	}
 	return n, err
 }
@@ -89,7 +110,6 @@ func (f *MemFile) Stat() (os.FileInfo, error) {
 		modTime:    f.modTime,
 		accessTime: f.accessTime,
 		changeTime: f.changeTime,
-		mode:       f.mode,
 		owner:      f.owner,
 	}, nil
 }
