@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"io"
 	"os"
+	"path"
 )
 
 // LocalFileSystem extends MemFileSystem with persistent storage capabilities
@@ -35,6 +36,17 @@ func NewLocalFileSystem(config FileSystemConfig) (*LocalFileSystem, error) {
 	return fs, nil
 }
 
+// populateFilesFlatMap recursively traverses dir and populates fs.Files
+func populateFilesFlatMap(dir *MemDirectory, currentPath string, files map[string]*MemFile) {
+	for name, file := range dir.Entries {
+		filePath := path.Join(currentPath, name)
+		files[filePath] = file
+	}
+	for dirName, subDir := range dir.Dirs {
+		populateFilesFlatMap(subDir, path.Join(currentPath, dirName), files)
+	}
+}
+
 // SaveToFile saves the in-memory file system to a binary file with optional compression and encryption
 func (fs *LocalFileSystem) SaveToFile(filepath string) error {
 	fs.mu.Lock()
@@ -42,7 +54,9 @@ func (fs *LocalFileSystem) SaveToFile(filepath string) error {
 
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
-	if err := encoder.Encode(fs.Files); err != nil {
+
+	snapshot := fs.RootDir.ToSerialized()
+	if err := encoder.Encode(snapshot); err != nil {
 		return err
 	}
 
@@ -92,6 +106,10 @@ func (fs *LocalFileSystem) LoadFromFile(filepath string) error {
 		return err
 	}
 
+	if len(data) == 0 {
+		return nil
+	}
+
 	if fs.encryption {
 		data, err = DecryptData(data, fs.encryptionKey)
 		if err != nil {
@@ -108,5 +126,19 @@ func (fs *LocalFileSystem) LoadFromFile(filepath string) error {
 
 	buf := bytes.NewBuffer(data)
 	decoder := gob.NewDecoder(buf)
-	return decoder.Decode(&fs.Files)
+
+	var snapshot SerializedDirectory
+	if err := decoder.Decode(&snapshot); err != nil {
+		return err
+	}
+
+	loadedRoot := snapshot.ToMemDirectory(nil)
+	fs.RootDir = loadedRoot
+	fs.CWD = loadedRoot
+
+	// Rebuild fs.Files flat map
+	fs.Files = make(map[string]*MemFile)
+	populateFilesFlatMap(loadedRoot, "", fs.Files)
+
+	return nil
 }

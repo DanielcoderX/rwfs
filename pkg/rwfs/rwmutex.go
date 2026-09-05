@@ -2,7 +2,6 @@ package rwfs
 
 import (
 	"sync"
-	"time"
 )
 
 // RWMutex is a wrapper around sync.RWMutex to provide additional functionalities.
@@ -32,30 +31,11 @@ func (m *RWMutex) RUnlock() {
 
 // TryLock attempts to lock the mutex for writing without blocking.
 func (m *RWMutex) TryLock() bool {
-	locked := make(chan struct{})
-	go func() {
-		m.mu.Lock()
-		close(locked)
-	}()
-	select {
-	case <-locked:
-		return true
-	case <-time.After(1 * time.Millisecond):
-		return false
-	}
+	return m.mu.TryLock()
 }
 
 // TryRLock attempts to lock the mutex for reading without blocking.
 func (m *RWMutex) TryRLock() bool {
-	locked := make(chan struct{})
-	go func() {
-		m.mu.RLock()
-		close(locked)
-	}()
-	select {
-	case <-locked:
-		return true
-	case <-time.After(1 * time.Millisecond):
-		return false
-	}
+	return m.mu.TryRLock()
 }
+

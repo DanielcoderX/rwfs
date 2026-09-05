@@ -1,11 +1,12 @@
 package rwfs
 
 import (
-	// "fmt"
 	"errors"
 	"os"
 	"time"
 )
+
+var _ FileSystem = (*MemFileSystem)(nil)
 
 // MemFileSystem represents an in-memory file system
 type MemFileSystem struct {
@@ -25,6 +26,7 @@ func NewMemFileSystem(config FileSystemConfig) *MemFileSystem {
 		Files:   make(map[string]*MemFile),
 		RootDir: rootDir,
 		CWD:     rootDir,
+		Config:  config,
 		Cache:   cache,
 	}
 }
@@ -37,37 +39,60 @@ func (fs *MemFileSystem) MaintainCache() {
 	}
 }
 
-// Open opens a file in the current directory
+// Open opens a file in the file system
 func (fs *MemFileSystem) Open(name string) (File, error) {
 	return fs.OpenFile(name)
 }
 
-// Create creates a new file in the current directory
-func (fs *MemFileSystem) Create(name, owner string, permissions FilePermission) (File, error) {
-	return fs.CreateFile(name, owner, permissions)
+// Create creates a new file with default owner and permissions
+func (fs *MemFileSystem) Create(name string) (File, error) {
+	return fs.CreateFile(name, "", FilePermission{Read: true, Write: true})
 }
 
-// Remove removes a file in the current directory
+// Remove removes a file from the file system
 func (fs *MemFileSystem) Remove(name string) error {
 	return fs.RemoveFile(name)
 }
 
-// Stat returns file information in the current directory
+// Stat returns file or directory information in the file system
 func (fs *MemFileSystem) Stat(name string) (os.FileInfo, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	file, exists := fs.CWD.Entries[name]
-	if !exists {
-		return nil, os.ErrNotExist
+	if name == "/" {
+		return &MemFileInfo{
+			name:    fs.RootDir.Name,
+			size:    0,
+			modTime: fs.RootDir.modTime,
+			mode:    os.ModeDir | 0755,
+		}, nil
 	}
 
-	// Check if the file has read permissions
-	if !file.permissions.Read {
-		return nil, errors.New("read permission denied")
+	parentDir, baseName, err := fs.resolvePath(name)
+	if err != nil {
+		return nil, err
 	}
 
-	return file.Stat()
+	if file, exists := parentDir.Entries[baseName]; exists {
+		if !file.permissions.Read {
+			return nil, errors.New("read permission denied")
+		}
+		return file.Stat()
+	}
+
+	if dir, exists := parentDir.Dirs[baseName]; exists {
+		if !dir.permissions.Read {
+			return nil, errors.New("read permission denied")
+		}
+		return &MemFileInfo{
+			name:    dir.Name,
+			size:    0,
+			modTime: dir.modTime,
+			mode:    os.ModeDir | 0755,
+		}, nil
+	}
+
+	return nil, os.ErrNotExist
 }
 
 // Link creates a hard link to an existing file
@@ -75,40 +100,34 @@ func (fs *MemFileSystem) Link(oldName, newName string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
+	oldParent, oldBase, err := fs.resolvePath(oldName)
+	if err != nil {
+		return err
+	}
+	newParent, newBase, err := fs.resolvePath(newName)
+	if err != nil {
+		return err
+	}
+
 	// Check if the old file exists
-	oldFile, exists := fs.CWD.Entries[oldName]
+	oldFile, exists := oldParent.Entries[oldBase]
 	if !exists {
 		return os.ErrNotExist
 	}
 
 	// Check if the new file already exists
-	if _, exists := fs.CWD.Entries[newName]; exists {
+	if _, exists := newParent.Entries[newBase]; exists {
 		return os.ErrExist
 	}
 
 	// Increment reference count and create new link
 	oldFile.refCount++
-	fs.CWD.Entries[newName] = oldFile
-	fs.CWD.modTime = time.Now()
+	newParent.Entries[newBase] = oldFile
+	newParent.modTime = time.Now()
 	return nil
 }
 
 // Unlink removes a hard link to a file
 func (fs *MemFileSystem) Unlink(name string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	// Check if the file exists
-	file, exists := fs.CWD.Entries[name]
-	if !exists {
-		return os.ErrNotExist
-	}
-
-	// Decrement reference count and remove link
-	file.refCount--
-	if file.refCount == 0 {
-		delete(fs.CWD.Entries, name)
-	}
-	fs.CWD.modTime = time.Now()
-	return nil
+	return fs.RemoveFile(name)
 }

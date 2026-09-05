@@ -12,6 +12,7 @@ import (
 type MemFile struct {
 	Name        string
 	Data        *bytes.Buffer
+	data        []byte
 	mu          RWMutex
 	size        int64
 	modTime     time.Time
@@ -31,7 +32,8 @@ func NewMemFile(name, owner string, permissions FilePermission) *MemFile {
 	now := time.Now()
 	return &MemFile{
 		Name:        name,
-		Data:        new(bytes.Buffer),
+		Data:        bytes.NewBuffer(nil),
+		data:        make([]byte, 0),
 		modTime:     now,
 		accessTime:  now,
 		changeTime:  now,
@@ -43,51 +45,54 @@ func NewMemFile(name, owner string, permissions FilePermission) *MemFile {
 
 // MemFile methods
 
-// Read data from the memory buffer
+// Read data from the memory file at the current position
 func (f *MemFile) Read(p []byte) (int, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.closed {
 		return 0, os.ErrClosed
 	}
-	if f.Config.Compression {
-		_, _ = DecompressData(f.Data.Bytes())
+	if len(p) == 0 {
+		return 0, nil
 	}
-	if f.Config.Encryption {
-		_, _ = DecryptData(f.Data.Bytes(), f.Config.EncryptionKey)
+	if f.position >= int64(len(f.data)) {
+		return 0, io.EOF
 	}
-	n, err := f.Data.Read(p)
-	if err == nil {
-		f.accessTime = time.Now()
-	}
-	return n, err
+	n := copy(p, f.data[f.position:])
+	f.position += int64(n)
+	f.accessTime = time.Now()
+	return n, nil
 }
 
-// Write data to the memory buffer
+// Write data to the memory file at the current position
 func (f *MemFile) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return 0, os.ErrClosed
 	}
-	f.Data.Reset()
-	if f.Config.Compression {
-		_, _ = CompressData(f.Data.Bytes(), f.Config.CompressLevel)
+	if len(p) == 0 {
+		return 0, nil
 	}
-	if f.Config.Encryption {
-		_, _ = EncryptData(f.Data.Bytes(), f.Config.EncryptionKey)
+	endPos := f.position + int64(len(p))
+	if endPos > int64(len(f.data)) {
+		newData := make([]byte, endPos)
+		copy(newData, f.data)
+		f.data = newData
 	}
-	n, err := f.Data.Write(p)
-	if err == nil {
-		f.size += int64(n)
-		f.modTime = time.Now()
-		f.changeTime = time.Now()
-	}
+	copy(f.data[f.position:], p)
+	f.position = endPos
+	f.size = int64(len(f.data))
+	now := time.Now()
+	f.modTime = now
+	f.changeTime = now
+	f.Data = bytes.NewBuffer(f.data)
+
 	// Cache the file after write
 	if f.Cache != nil {
 		f.Cache.Put(f.Name, f, true)
 	}
-	return n, err
+	return len(p), nil
 }
 
 // Close the memory file
@@ -131,7 +136,7 @@ func (f *MemFile) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		abs = f.position + offset
 	case io.SeekEnd:
-		abs = int64(f.Data.Len()) + offset
+		abs = int64(len(f.data)) + offset
 	default:
 		return 0, errors.New("invalid whence")
 	}
@@ -160,5 +165,5 @@ func (fi *MemFileInfo) ModTime() time.Time    { return fi.modTime }
 func (fi *MemFileInfo) AccessTime() time.Time { return fi.accessTime }
 func (fi *MemFileInfo) ChangeTime() time.Time { return fi.changeTime }
 func (fi *MemFileInfo) Owner() string         { return fi.owner }
-func (fi *MemFileInfo) IsDir() bool           { return false }
+func (fi *MemFileInfo) IsDir() bool           { return fi.mode.IsDir() }
 func (fi *MemFileInfo) Sys() interface{}      { return nil }

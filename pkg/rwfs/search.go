@@ -17,6 +17,7 @@ func (fs *MemFileSystem) Search(pattern string) ([]SearchResult, error) {
 	defer fs.mu.RUnlock()
 
 	var results []SearchResult
+	var resMu sync.Mutex
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, err
@@ -28,7 +29,9 @@ func (fs *MemFileSystem) Search(pattern string) ([]SearchResult, error) {
 		go func(name string, file *MemFile) {
 			defer wg.Done()
 			if re.MatchString(name) {
+				resMu.Lock()
 				results = append(results, SearchResult{Name: name, IsDir: false})
+				resMu.Unlock()
 			}
 		}(name, file)
 	}
@@ -37,7 +40,9 @@ func (fs *MemFileSystem) Search(pattern string) ([]SearchResult, error) {
 		go func(name string, dir *MemDirectory) {
 			defer wg.Done()
 			if re.MatchString(name) {
+				resMu.Lock()
 				results = append(results, SearchResult{Name: name, IsDir: true})
+				resMu.Unlock()
 			}
 		}(name, dir)
 	}

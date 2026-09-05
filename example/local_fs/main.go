@@ -3,14 +3,18 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/DanielcoderX/rwfs/pkg/rwfs"
 )
 
 func main() {
+	dataFile := "data.rwfs"
+	defer os.Remove(dataFile)
+
 	// Define the file system configuration
 	config := rwfs.FileSystemConfig{
-		Filepath:      "data.rwfs",
+		Filepath:      dataFile,
 		Compression:   true,
 		CompressLevel: 9,
 		Encryption:    false,
@@ -33,8 +37,8 @@ func main() {
 		log.Fatalf("Failed to change directory: %v", err)
 	}
 
-	// Create a new file
-	file, err := fs.CreateFile("example_file.txt", "owner1", rwfs.FilePermission{})
+	// Create a new file with read/write permissions
+	file, err := fs.CreateFile("example_file.txt", "owner1", rwfs.FilePermission{Read: true, Write: true})
 	if err != nil {
 		log.Fatalf("Failed to create file: %v", err)
 	}
@@ -86,17 +90,21 @@ func main() {
 		log.Fatalf("Failed to remove file: %v", err)
 	}
 	// Ensure to ChangeDir before deleting the directory
-	fs.ChangeDir("/")
+	err = fs.ChangeDir("/")
+	if err != nil {
+		log.Fatalf("Failed to change directory: %v", err)
+	}
 	// Remove the directory
 	err = fs.RemoveDir("example_dir")
 	if err != nil {
 		log.Fatalf("Failed to remove directory: %v", err)
 	}
 
-	fmt.Println(fs.CWD)
+	fmt.Println("CWD after cleanup:", fs.CWD.Name)
 	// Save the file system state
 	err = fs.SaveToFile(config.Filepath)
 	if err != nil {
 		log.Fatalf("Failed to save file system: %v", err)
 	}
+	fmt.Println("Local file system saved successfully.")
 }

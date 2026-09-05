@@ -8,12 +8,16 @@ import (
 )
 
 func main() {
-	// Create a new file cache
+	// Create a new file cache with a 2-second TTL
 	cache := rwfs.NewFileCache()
+	cache.SetTTL(2 * time.Second)
 
-	// Create MemFile instances
-	memFile1 := rwfs.NewMemFile("key1", "", rwfs.FilePermission{})
-	memFile2 := rwfs.NewMemFile("key2", "", rwfs.FilePermission{})
+	// Create MemFile instances and write sample data
+	memFile1 := rwfs.NewMemFile("key1", "", rwfs.FilePermission{Read: true, Write: true})
+	_, _ = memFile1.Write([]byte("Sample content for key 1"))
+
+	memFile2 := rwfs.NewMemFile("key2", "", rwfs.FilePermission{Read: true, Write: true})
+	_, _ = memFile2.Write([]byte("Sample content for key 2"))
 
 	// Put MemFile instances into the cache
 	cache.Put("key1", memFile1, false) // Not dirty
@@ -24,7 +28,7 @@ func main() {
 	data2, exists2 := cache.Get("key2")
 
 	if exists1 {
-		fmt.Printf("Data for key1: %s\n", data1)
+		fmt.Printf("Data for key1: %s\n", data1.Data.Bytes())
 	} else {
 		fmt.Println("Data for key1 not found in cache")
 	}
@@ -36,6 +40,7 @@ func main() {
 	}
 
 	// Wait for some time to demonstrate cache expiration
+	fmt.Println("Waiting 3 seconds for cache TTL to expire...")
 	time.Sleep(time.Second * 3)
 
 	// Check if the cached data expired

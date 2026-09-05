@@ -3,7 +3,70 @@ package rwfs
 import (
 	"bytes"
 	"encoding/gob"
+	"time"
 )
+
+func init() {
+	gob.Register(&SerializedDirectory{})
+	gob.Register(&MemFile{})
+	gob.Register(DirPermission{})
+	gob.Register(FilePermission{})
+}
+
+// SerializedDirectory represents a serializable snapshot of a directory tree
+type SerializedDirectory struct {
+	Name        string
+	Entries     map[string]*MemFile
+	Dirs        map[string]*SerializedDirectory
+	ModTime     time.Time
+	Permissions DirPermission
+}
+
+// ToSerialized converts a MemDirectory hierarchy to a SerializedDirectory
+func (dir *MemDirectory) ToSerialized() *SerializedDirectory {
+	if dir == nil {
+		return nil
+	}
+	s := &SerializedDirectory{
+		Name:        dir.Name,
+		Entries:     make(map[string]*MemFile, len(dir.Entries)),
+		Dirs:        make(map[string]*SerializedDirectory, len(dir.Dirs)),
+		ModTime:     dir.modTime,
+		Permissions: dir.permissions,
+	}
+	for k, v := range dir.Entries {
+		s.Entries[k] = v
+	}
+	for k, v := range dir.Dirs {
+		s.Dirs[k] = v.ToSerialized()
+	}
+	return s
+}
+
+// ToMemDirectory reconstructs a MemDirectory hierarchy with Parent references
+func (s *SerializedDirectory) ToMemDirectory(parent *MemDirectory) *MemDirectory {
+	if s == nil {
+		return nil
+	}
+	dir := &MemDirectory{
+		Name:        s.Name,
+		Entries:     make(map[string]*MemFile, len(s.Entries)),
+		Dirs:        make(map[string]*MemDirectory, len(s.Dirs)),
+		Parent:      parent,
+		modTime:     s.ModTime,
+		permissions: s.Permissions,
+	}
+	if parent == nil {
+		dir.Parent = dir
+	}
+	for k, v := range s.Entries {
+		dir.Entries[k] = v
+	}
+	for k, childS := range s.Dirs {
+		dir.Dirs[k] = childS.ToMemDirectory(dir)
+	}
+	return dir
+}
 
 // Custom Gob Encode method for MemFile
 func (f *MemFile) GobEncode() ([]byte, error) {
@@ -40,7 +103,13 @@ func (f *MemFile) GobEncode() ([]byte, error) {
 	}
 
 	// Encode the Data field as a byte slice
-	if err := encoder.Encode(f.Data.Bytes()); err != nil {
+	var content []byte
+	if len(f.data) > 0 {
+		content = f.data
+	} else if f.Data != nil {
+		content = f.Data.Bytes()
+	}
+	if err := encoder.Encode(content); err != nil {
 		return nil, err
 	}
 
@@ -87,7 +156,10 @@ func (f *MemFile) GobDecode(data []byte) error {
 	if err := decoder.Decode(&dataBytes); err != nil {
 		return err
 	}
+	f.data = dataBytes
+	f.size = int64(len(dataBytes))
 	f.Data = bytes.NewBuffer(dataBytes)
+	f.refCount = 1
 
 	return nil
 }

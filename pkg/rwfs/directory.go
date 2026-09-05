@@ -3,6 +3,8 @@ package rwfs
 import (
 	"errors"
 	"os"
+	"path"
+	"strings"
 	"time"
 )
 
@@ -19,19 +21,86 @@ type MemDirectory struct {
 	mu          RWMutex
 	Entries     map[string]*MemFile
 	Dirs        map[string]*MemDirectory
+	Parent      *MemDirectory
 	modTime     time.Time
 	permissions DirPermission
 }
 
 // NewMemDirectory creates a new memory directory
 func NewMemDirectory(name string, permissions DirPermission) *MemDirectory {
-	return &MemDirectory{
+	d := &MemDirectory{
 		Name:        name,
 		Entries:     make(map[string]*MemFile),
 		Dirs:        make(map[string]*MemDirectory),
 		modTime:     time.Now(),
 		permissions: permissions,
 	}
+	d.Parent = d
+	return d
+}
+
+// resolveDir resolves a path to a target directory starting from CWD or RootDir.
+func (fs *MemFileSystem) resolveDir(dirPath string) (*MemDirectory, error) {
+	dirPath = path.Clean(dirPath)
+	if dirPath == "." || dirPath == "" {
+		return fs.CWD, nil
+	}
+	if dirPath == "/" {
+		return fs.RootDir, nil
+	}
+
+	var cur *MemDirectory
+	if strings.HasPrefix(dirPath, "/") {
+		cur = fs.RootDir
+		dirPath = strings.TrimPrefix(dirPath, "/")
+	} else {
+		cur = fs.CWD
+	}
+
+	parts := strings.Split(dirPath, "/")
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if cur.Parent != nil {
+				cur = cur.Parent
+			}
+			continue
+		}
+
+		if !cur.permissions.Execute {
+			return nil, errors.New("execute permission denied")
+		}
+
+		child, exists := cur.Dirs[part]
+		if !exists {
+			return nil, errors.New("directory does not exist: " + part)
+		}
+		cur = child
+	}
+
+	return cur, nil
+}
+
+// resolvePath splits a path into its parent directory and target base name.
+func (fs *MemFileSystem) resolvePath(targetPath string) (*MemDirectory, string, error) {
+	cleanPath := path.Clean(targetPath)
+	dirPart, basePart := path.Split(cleanPath)
+
+	var parentDir *MemDirectory
+	var err error
+
+	if dirPart == "" || dirPart == "." {
+		parentDir = fs.CWD
+	} else {
+		parentDir, err = fs.resolveDir(dirPart)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	return parentDir, basePart, nil
 }
 
 // CreateDir creates a new directory within the file system
@@ -39,24 +108,27 @@ func (fs *MemFileSystem) CreateDir(name string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Check if the current directory has write permissions
-	if !fs.CWD.permissions.Write {
+	parentDir, dirName, err := fs.resolvePath(name)
+	if err != nil {
+		return err
+	}
+	if dirName == "" || dirName == "." || dirName == ".." {
+		return errors.New("invalid directory name")
+	}
+
+	// Check if parent directory has write permissions
+	if !parentDir.permissions.Write {
 		return errors.New("write permission denied")
 	}
 
-	if _, exists := fs.CWD.Dirs[name]; exists {
+	if _, exists := parentDir.Dirs[dirName]; exists {
 		return errors.New("directory already exists")
 	}
 
-	newDir := NewMemDirectory(name, DirPermission{Read: true, Write: true, Execute: true})
-	// Add the new directory to the appropriate parent directory
-	if fs.CWD == fs.RootDir {
-		fs.RootDir.Dirs[name] = newDir
-	} else {
-		fs.CWD.Dirs[name] = newDir
-	}
-
-	fs.CWD.modTime = time.Now()
+	newDir := NewMemDirectory(dirName, DirPermission{Read: true, Write: true, Execute: true})
+	newDir.Parent = parentDir
+	parentDir.Dirs[dirName] = newDir
+	parentDir.modTime = time.Now()
 
 	return nil
 }
@@ -66,24 +138,33 @@ func (fs *MemFileSystem) RemoveDir(name string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Check if the directory being removed is the current working directory of any user
-	for _, dir := range fs.CWD.Dirs {
-		if dir == fs.CWD {
-			return errors.New("cannot remove directory: current working directory")
-		}
+	parentDir, dirName, err := fs.resolvePath(name)
+	if err != nil {
+		return err
 	}
 
-	// Check if the current directory has write permissions
-	if !fs.CWD.permissions.Write {
+	if !parentDir.permissions.Write {
 		return errors.New("write permission denied")
 	}
-	// Check if the directory exists
-	if _, exists := fs.CWD.Dirs[name]; !exists {
-		return errors.New("directory does not exist. Try PWD and ChangeDir")
+
+	targetDir, exists := parentDir.Dirs[dirName]
+	if !exists {
+		return errors.New("directory does not exist")
 	}
-	// Remove the directory
-	delete(fs.CWD.Dirs, name)
-	fs.CWD.modTime = time.Now()
+
+	// Prevent removing CWD or any ancestor of CWD
+	for cur := fs.CWD; cur != nil; {
+		if cur == targetDir {
+			return errors.New("cannot remove directory: current working directory or ancestor")
+		}
+		if cur.Parent == cur || cur.Parent == nil {
+			break
+		}
+		cur = cur.Parent
+	}
+
+	delete(parentDir.Dirs, dirName)
+	parentDir.modTime = time.Now()
 
 	return nil
 }
@@ -93,17 +174,9 @@ func (fs *MemFileSystem) ChangeDir(name string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-
-	var dir *MemDirectory
-	var exists bool
-
-	if name == "/" {
-		dir = fs.RootDir
-	} else {
-		dir, exists = fs.CWD.Dirs[name]
-		if !exists {
-			return errors.New("directory does not exist")
-		}
+	dir, err := fs.resolveDir(name)
+	if err != nil {
+		return err
 	}
 
 	// Check if the target directory has execute permissions
@@ -115,74 +188,162 @@ func (fs *MemFileSystem) ChangeDir(name string) error {
 	return nil
 }
 
-// CreateFile creates a new file in the current directory
+// CreateFile creates a new file in the target directory
 func (fs *MemFileSystem) CreateFile(name, owner string, permissions FilePermission) (File, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Check if the current directory has write permissions
-	if !fs.CWD.permissions.Write {
+	parentDir, fileName, err := fs.resolvePath(name)
+	if err != nil {
+		return nil, err
+	}
+	if fileName == "" || fileName == "." || fileName == ".." {
+		return nil, errors.New("invalid file name")
+	}
+
+	// Check if the directory has write permissions
+	if !parentDir.permissions.Write {
 		return nil, errors.New("write permission denied")
 	}
 
-	if _, exists := fs.CWD.Entries[name]; exists {
+	if _, exists := parentDir.Entries[fileName]; exists {
 		return nil, os.ErrExist
 	}
 
-	file := NewMemFile(name, owner, permissions)
-	fs.CWD.Entries[name] = file
-	fs.CWD.modTime = time.Now()
-	fs.Cache.Put(name, file, true)
+	file := NewMemFile(fileName, owner, permissions)
+	file.Config = fs.Config
+	file.Cache = fs.Cache
+	parentDir.Entries[fileName] = file
+	parentDir.modTime = time.Now()
+	if fs.Cache != nil {
+		fs.Cache.Put(fileName, file, true)
+	}
 	return file, nil
 }
 
-// OpenFile opens a file in the current directory
+// OpenFile opens a file in the target directory
 func (fs *MemFileSystem) OpenFile(name string) (File, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	if file, exists := fs.Cache.Get(name); exists {
-		file.closed = false
-		return file, nil
+
+	parentDir, fileName, err := fs.resolvePath(name)
+	if err != nil {
+		return nil, err
 	}
-	file, exists := fs.CWD.Entries[name]
-	if !exists {
-		return nil, os.ErrNotExist
+
+	var file *MemFile
+	if fs.Cache != nil {
+		if cachedFile, exists := fs.Cache.Get(fileName); exists {
+			file = cachedFile
+		}
 	}
+
+	if file == nil {
+		var exists bool
+		file, exists = parentDir.Entries[fileName]
+		if !exists {
+			return nil, os.ErrNotExist
+		}
+	}
+
 	// Check if the file has read permissions
 	if !file.permissions.Read {
 		return nil, errors.New("read permission denied")
 	}
 
+	file.mu.Lock()
 	file.closed = false
+	file.position = 0
+	file.mu.Unlock()
+
 	return file, nil
 }
 
-// RemoveFile removes a file from the current directory
+// RemoveFile removes a file from the target directory
 func (fs *MemFileSystem) RemoveFile(name string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Check if the current directory has write permissions
-	if !fs.CWD.permissions.Write {
+	parentDir, fileName, err := fs.resolvePath(name)
+	if err != nil {
+		return err
+	}
+
+	if !parentDir.permissions.Write {
 		return errors.New("write permission denied")
 	}
-	file, exists := fs.CWD.Entries[name]
+
+	file, exists := parentDir.Entries[fileName]
 	if !exists {
 		return os.ErrNotExist
 	}
+
 	if file.refCount > 1 {
 		file.refCount--
 	} else {
-		delete(fs.CWD.Entries, name)
-
+		delete(parentDir.Entries, fileName)
 	}
-	fs.CWD.modTime = time.Now()
+	parentDir.modTime = time.Now()
 
 	// Remove from cache
-	fs.Cache.mu.Lock()
-	defer fs.Cache.mu.Unlock()
-	delete(fs.Cache.entries, name)
+	if fs.Cache != nil {
+		fs.Cache.Remove(fileName)
+	}
 	return nil
+}
+
+// Rename renames or moves a file or directory
+func (fs *MemFileSystem) Rename(oldName, newName string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	oldParent, oldBase, err := fs.resolvePath(oldName)
+	if err != nil {
+		return err
+	}
+	newParent, newBase, err := fs.resolvePath(newName)
+	if err != nil {
+		return err
+	}
+
+	if !oldParent.permissions.Write || !newParent.permissions.Write {
+		return errors.New("write permission denied")
+	}
+
+	// Check if old is a file
+	if file, exists := oldParent.Entries[oldBase]; exists {
+		if _, destExists := newParent.Entries[newBase]; destExists {
+			return os.ErrExist
+		}
+		delete(oldParent.Entries, oldBase)
+		file.Name = newBase
+		newParent.Entries[newBase] = file
+		now := time.Now()
+		oldParent.modTime = now
+		newParent.modTime = now
+		if fs.Cache != nil {
+			fs.Cache.Remove(oldBase)
+			fs.Cache.Put(newBase, file, true)
+		}
+		return nil
+	}
+
+	// Check if old is a directory
+	if dir, exists := oldParent.Dirs[oldBase]; exists {
+		if _, destExists := newParent.Dirs[newBase]; destExists {
+			return errors.New("directory already exists")
+		}
+		delete(oldParent.Dirs, oldBase)
+		dir.Name = newBase
+		dir.Parent = newParent
+		newParent.Dirs[newBase] = dir
+		now := time.Now()
+		oldParent.modTime = now
+		newParent.modTime = now
+		return nil
+	}
+
+	return os.ErrNotExist
 }
 
 func (fs *MemFileSystem) ListFiles() ([]string, error) {
@@ -221,26 +382,26 @@ func (fs *MemFileSystem) ListDirContents() ([]DirEntry, error) {
 
 // DirectoryContents represents the contents of a directory
 type DirectoryContents struct {
-    DirectoryName  string
-    Files          []string
-    Subdirectories []string
+	DirectoryName  string
+	Files          []string
+	Subdirectories []string
 }
 
 // GetDirectoryContents returns the contents of the directory in a structured format
 func (dir *MemDirectory) GetDirectoryContents() DirectoryContents {
-    files := make([]string, 0, len(dir.Entries))
-    for fileName := range dir.Entries {
-        files = append(files, fileName)
-    }
+	files := make([]string, 0, len(dir.Entries))
+	for fileName := range dir.Entries {
+		files = append(files, fileName)
+	}
 
-    subDirs := make([]string, 0, len(dir.Dirs))
-    for subDirName := range dir.Dirs {
-        subDirs = append(subDirs, subDirName)
-    }
+	subDirs := make([]string, 0, len(dir.Dirs))
+	for subDirName := range dir.Dirs {
+		subDirs = append(subDirs, subDirName)
+	}
 
-    return DirectoryContents{
-        DirectoryName:  dir.Name,
-        Files:          files,
-        Subdirectories: subDirs,
-    }
+	return DirectoryContents{
+		DirectoryName:  dir.Name,
+		Files:          files,
+		Subdirectories: subDirs,
+	}
 }

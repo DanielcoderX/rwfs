@@ -178,7 +178,7 @@ func main() {
     }
 
 // Create and navigate directories
-    err := fs.CreateDir("dir1")
+    err = fs.CreateDir("dir1")
     if err != nil {
         fmt.Println("Error creating directory:", err)
         return
