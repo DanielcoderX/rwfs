@@ -8,94 +8,208 @@ import (
 	"time"
 )
 
-// MemFile represents a file in the memory file system
+// MemFile represents an open file handle backed by a block-paged Inode.
 type MemFile struct {
 	Name        string
-	Data        *bytes.Buffer
-	data        []byte
+	inode       *Inode
 	mu          RWMutex
-	size        int64
-	modTime     time.Time
-	accessTime  time.Time
-	changeTime  time.Time
-	owner       string
 	position    int64
 	closed      bool
 	permissions FilePermission
 	refCount    int
+	Data        *bytes.Buffer
 	Config      FileSystemConfig
 	Cache       *FileCache
 }
 
-// NewMemFile creates a new memory file
+// NewMemFile creates a new memory file handle with an underlying Inode.
 func NewMemFile(name, owner string, permissions FilePermission) *MemFile {
-	now := time.Now()
+	inode := NewInode(owner, permissions)
 	return &MemFile{
 		Name:        name,
+		inode:       inode,
 		Data:        bytes.NewBuffer(nil),
-		data:        make([]byte, 0),
-		modTime:     now,
-		accessTime:  now,
-		changeTime:  now,
-		owner:       owner,
 		permissions: permissions,
 		refCount:    1,
 	}
 }
 
-// MemFile methods
+// Inode returns the underlying Inode.
+func (f *MemFile) Inode() *Inode {
+	return f.inode
+}
 
-// Read data from the memory file at the current position
+// SetInode binds this file handle to an existing Inode (e.g., for hard links).
+func (f *MemFile) SetInode(in *Inode) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inode = in
+	f.permissions = in.permissions
+}
+
+// Size returns the file size in bytes.
+func (f *MemFile) Size() int64 {
+	if f.inode != nil {
+		return f.inode.Size()
+	}
+	return 0
+}
+
+// ModTime returns the modification time of the underlying inode.
+func (f *MemFile) ModTime() time.Time {
+	if f.inode != nil {
+		f.inode.mu.RLock()
+		defer f.inode.mu.RUnlock()
+		return f.inode.modTime
+	}
+	return time.Now()
+}
+
+// Read reads up to len(p) bytes from the file starting at the handle's cursor position.
 func (f *MemFile) Read(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.closed {
 		return 0, os.ErrClosed
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if f.position >= int64(len(f.data)) {
+
+	if f.position >= f.inode.Size() {
 		return 0, io.EOF
 	}
-	n := copy(p, f.data[f.position:])
+
+	n, err := f.inode.ReadAt(p, f.position)
 	f.position += int64(n)
-	f.accessTime = time.Now()
-	return n, nil
+	if n > 0 && err == io.EOF {
+		return n, nil
+	}
+	return n, err
 }
 
-// Write data to the memory file at the current position
+// Write writes len(p) bytes to the file at the handle's cursor position.
 func (f *MemFile) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.closed {
 		return 0, os.ErrClosed
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
-	endPos := f.position + int64(len(p))
-	if endPos > int64(len(f.data)) {
-		newData := make([]byte, endPos)
-		copy(newData, f.data)
-		f.data = newData
-	}
-	copy(f.data[f.position:], p)
-	f.position = endPos
-	f.size = int64(len(f.data))
-	now := time.Now()
-	f.modTime = now
-	f.changeTime = now
-	f.Data = bytes.NewBuffer(f.data)
 
-	// Cache the file after write
+	n, err := f.inode.WriteAt(p, f.position)
+	if err != nil {
+		return n, err
+	}
+	f.position += int64(n)
+	f.Data = bytes.NewBuffer(f.inode.DirectBytes())
+
 	if f.Cache != nil {
 		f.Cache.Put(f.Name, f, true)
 	}
-	return len(p), nil
+	return n, nil
 }
 
-// Close the memory file
+// ReadFrom implements io.ReaderFrom for streaming data directly into the block storage.
+func (f *MemFile) ReadFrom(r io.Reader) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return 0, os.ErrClosed
+	}
+
+	buf := AllocBlock()
+	defer FreeBlock(buf)
+
+	var total int64
+	for {
+		nr, err := r.Read(buf[:])
+		if nr > 0 {
+			nw, werr := f.inode.WriteAt(buf[:nr], f.position)
+			f.position += int64(nw)
+			total += int64(nw)
+			if werr != nil {
+				f.Data = bytes.NewBuffer(f.inode.DirectBytes())
+				return total, werr
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			f.Data = bytes.NewBuffer(f.inode.DirectBytes())
+			return total, err
+		}
+	}
+	f.Data = bytes.NewBuffer(f.inode.DirectBytes())
+	return total, nil
+}
+
+// WriteTo implements io.WriterTo for streaming directly from block storage to an io.Writer.
+func (f *MemFile) WriteTo(w io.Writer) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return 0, os.ErrClosed
+	}
+
+	buf := AllocBlock()
+	defer FreeBlock(buf)
+
+	var total int64
+	for {
+		nr, rerr := f.inode.ReadAt(buf[:], f.position)
+		if nr > 0 {
+			nw, werr := w.Write(buf[:nr])
+			f.position += int64(nw)
+			total += int64(nw)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return total, rerr
+		}
+	}
+	return total, nil
+}
+
+// BytesAt returns a slice of file data, using zero-copy block slicing when within a single block.
+func (f *MemFile) BytesAt(offset int64, length int) ([]byte, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.closed {
+		return nil, os.ErrClosed
+	}
+	return f.inode.BytesAt(offset, length)
+}
+
+// Truncate resizes the file to size, freeing surplus blocks to the pool.
+func (f *MemFile) Truncate(size int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return os.ErrClosed
+	}
+	err := f.inode.Truncate(size)
+	if err == nil {
+		f.Data = bytes.NewBuffer(f.inode.DirectBytes())
+	}
+	return err
+}
+
+// Close closes the file handle.
 func (f *MemFile) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -106,29 +220,39 @@ func (f *MemFile) Close() error {
 	return nil
 }
 
+// Stat returns file information from the underlying inode.
 func (f *MemFile) Stat() (os.FileInfo, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+
+	f.inode.mu.RLock()
+	defer f.inode.mu.RUnlock()
+
 	return &MemFileInfo{
 		name:       f.Name,
-		size:       f.size,
-		modTime:    f.modTime,
-		accessTime: f.accessTime,
-		changeTime: f.changeTime,
-		owner:      f.owner,
+		size:       f.inode.size,
+		modTime:    f.inode.modTime,
+		accessTime: f.inode.accessTime,
+		changeTime: f.inode.changeTime,
+		owner:      f.inode.owner,
 	}, nil
 }
 
+// Sync is a no-op for memory files.
 func (f *MemFile) Sync() error {
-	return nil // No-op for in-memory files
+	return nil
 }
 
+// Seek sets the handle's cursor position.
 func (f *MemFile) Seek(offset int64, whence int) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if f.closed {
 		return 0, os.ErrClosed
 	}
+
+	size := f.inode.Size()
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -136,7 +260,7 @@ func (f *MemFile) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		abs = f.position + offset
 	case io.SeekEnd:
-		abs = int64(len(f.data)) + offset
+		abs = size + offset
 	default:
 		return 0, errors.New("invalid whence")
 	}
@@ -147,7 +271,7 @@ func (f *MemFile) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-// MemFileInfo implements os.FileInfo for in-memory files
+// MemFileInfo implements os.FileInfo for in-memory files.
 type MemFileInfo struct {
 	name       string
 	size       int64

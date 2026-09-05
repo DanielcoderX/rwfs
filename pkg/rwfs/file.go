@@ -11,4 +11,6 @@ type File interface {
 	Close() error
 	Stat() (os.FileInfo, error)
 	Seek(offset int64, whence int) (int64, error)
+	BytesAt(offset int64, length int) ([]byte, error)
+	Truncate(size int64) error
 }

@@ -78,6 +78,12 @@ func main() {
 	}
 	fmt.Printf("File information: %+v\n", fileInfo)
 
+	// Demonstrate zero-copy slice access from 4KB page block
+	slice, err := file.BytesAt(7, 4)
+	if err == nil {
+		fmt.Printf("Zero-copy slice [7:11]: %s\n", slice)
+	}
+
 	// Close the file
 	err = file.Close()
 	if err != nil {

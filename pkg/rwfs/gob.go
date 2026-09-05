@@ -76,20 +76,38 @@ func (f *MemFile) GobEncode() ([]byte, error) {
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
 
+	var modTime, accessTime, changeTime time.Time
+	var owner string
+	var permissions FilePermission
+	var content []byte
+
+	if f.inode != nil {
+		f.inode.mu.RLock()
+		modTime = f.inode.modTime
+		accessTime = f.inode.accessTime
+		changeTime = f.inode.changeTime
+		owner = f.inode.owner
+		permissions = f.inode.permissions
+		content = f.inode.DirectBytes()
+		f.inode.mu.RUnlock()
+	} else if f.Data != nil {
+		content = f.Data.Bytes()
+	}
+
 	// Encode the simple fields
 	if err := encoder.Encode(f.Name); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.modTime); err != nil {
+	if err := encoder.Encode(modTime); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.accessTime); err != nil {
+	if err := encoder.Encode(accessTime); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.changeTime); err != nil {
+	if err := encoder.Encode(changeTime); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.owner); err != nil {
+	if err := encoder.Encode(owner); err != nil {
 		return nil, err
 	}
 	if err := encoder.Encode(f.position); err != nil {
@@ -98,17 +116,11 @@ func (f *MemFile) GobEncode() ([]byte, error) {
 	if err := encoder.Encode(f.closed); err != nil {
 		return nil, err
 	}
-	if err := encoder.Encode(f.permissions); err != nil {
+	if err := encoder.Encode(permissions); err != nil {
 		return nil, err
 	}
 
 	// Encode the Data field as a byte slice
-	var content []byte
-	if len(f.data) > 0 {
-		content = f.data
-	} else if f.Data != nil {
-		content = f.Data.Bytes()
-	}
 	if err := encoder.Encode(content); err != nil {
 		return nil, err
 	}
@@ -124,42 +136,58 @@ func (f *MemFile) GobDecode(data []byte) error {
 	buf := bytes.NewBuffer(data)
 	decoder := gob.NewDecoder(buf)
 
+	var name, owner string
+	var modTime, accessTime, changeTime time.Time
+	var position int64
+	var closed bool
+	var permissions FilePermission
+
 	// Decode the simple fields
-	if err := decoder.Decode(&f.Name); err != nil {
+	if err := decoder.Decode(&name); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.modTime); err != nil {
+	if err := decoder.Decode(&modTime); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.accessTime); err != nil {
+	if err := decoder.Decode(&accessTime); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.changeTime); err != nil {
+	if err := decoder.Decode(&changeTime); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.owner); err != nil {
+	if err := decoder.Decode(&owner); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.position); err != nil {
+	if err := decoder.Decode(&position); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&f.closed); err != nil {
+	if err := decoder.Decode(&closed); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&permissions); err != nil {
 		return err
 	}
 
-	// Encode the permissions
-	if err := decoder.Decode(&f.permissions); err != nil {
-		return err
-	}
 	// Decode the Data field as a byte slice
 	var dataBytes []byte
 	if err := decoder.Decode(&dataBytes); err != nil {
 		return err
 	}
-	f.data = dataBytes
-	f.size = int64(len(dataBytes))
-	f.Data = bytes.NewBuffer(dataBytes)
+
+	f.Name = name
+	f.position = position
+	f.closed = closed
+	f.permissions = permissions
 	f.refCount = 1
+
+	f.inode = NewInode(owner, permissions)
+	f.inode.modTime = modTime
+	f.inode.accessTime = accessTime
+	f.inode.changeTime = changeTime
+	if len(dataBytes) > 0 {
+		_, _ = f.inode.WriteAt(dataBytes, 0)
+	}
+	f.Data = bytes.NewBuffer(dataBytes)
 
 	return nil
 }

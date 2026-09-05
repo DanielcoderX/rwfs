@@ -278,11 +278,16 @@ func (fs *MemFileSystem) RemoveFile(name string) error {
 		return os.ErrNotExist
 	}
 
-	if file.refCount > 1 {
-		file.refCount--
-	} else {
-		delete(parentDir.Entries, fileName)
+	if file.inode != nil {
+		file.inode.mu.Lock()
+		file.inode.refCount--
+		shouldFree := file.inode.refCount <= 0
+		file.inode.mu.Unlock()
+		if shouldFree {
+			file.inode.Free()
+		}
 	}
+	delete(parentDir.Entries, fileName)
 	parentDir.modTime = time.Now()
 
 	// Remove from cache
@@ -367,7 +372,7 @@ func (fs *MemFileSystem) ListDirContents() ([]DirEntry, error) {
 		entries = append(entries, DirEntry{
 			Name:    name,
 			IsDir:   false,
-			ModTime: file.modTime,
+			ModTime: file.ModTime(),
 		})
 	}
 	for name, dir := range fs.CWD.Dirs {

@@ -10,8 +10,8 @@ func TestMemFileReadWrite(t *testing.T) {
 	file := NewMemFile("test.txt", "user", FilePermission{Read: true, Write: true})
 
 	// Initial size
-	if file.size != 0 {
-		t.Fatalf("expected initial size 0, got %d", file.size)
+	if file.Size() != 0 {
+		t.Fatalf("expected initial size 0, got %d", file.Size())
 	}
 
 	// Write data
@@ -29,8 +29,8 @@ func TestMemFileReadWrite(t *testing.T) {
 	}
 
 	expectedLen := int64(len("Hello, World!"))
-	if file.size != expectedLen {
-		t.Fatalf("expected size %d, got %d", expectedLen, file.size)
+	if file.Size() != expectedLen {
+		t.Fatalf("expected size %d, got %d", expectedLen, file.Size())
 	}
 
 	// Seek to beginning and read back

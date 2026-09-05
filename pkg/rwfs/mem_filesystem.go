@@ -120,9 +120,25 @@ func (fs *MemFileSystem) Link(oldName, newName string) error {
 		return os.ErrExist
 	}
 
-	// Increment reference count and create new link
+	// Increment reference count and create new link sharing the underlying Inode
 	oldFile.refCount++
-	newParent.Entries[newBase] = oldFile
+	if oldFile.inode != nil {
+		oldFile.inode.mu.Lock()
+		oldFile.inode.refCount++
+		oldFile.inode.mu.Unlock()
+	}
+
+	newFile := &MemFile{
+		Name:        newBase,
+		inode:       oldFile.inode,
+		permissions: oldFile.permissions,
+		refCount:    oldFile.refCount,
+		Config:      fs.Config,
+		Cache:       fs.Cache,
+		Data:        oldFile.Data,
+	}
+
+	newParent.Entries[newBase] = newFile
 	newParent.modTime = time.Now()
 	return nil
 }
